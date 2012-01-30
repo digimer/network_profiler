@@ -12,4 +12,7 @@ records the performance at the various MTUs and reports in simple ASCII art
 graphs the results of the test. Benchmarking is done using iperf.
 
 For best results, both local and remote machine's IPs should be on the same
-type of network hardware.
+type of network card. This is because the MTU is adjusted in tandem on both 
+sides, and differing hardware may not produce the most useful information. It
+will, however, provide the best MTU for that scenario, if your hardware is
+already deployed.
