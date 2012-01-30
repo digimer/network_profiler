@@ -1,0 +1,779 @@
+#!/usr/bin/perl
+#
+# This takes a local and remote IP address, discovers the maximum effective MTU
+# and then runs iperf tests in half and full duplex modes. The optimal MTU is then
+# returned.
+# 
+# You must have:
+# - Shared root user SSH keys without passphrases
+# - iperf installed
+# - expect installed
+# - Time::HiRes installed (ie: perl-Time-HiRes RPM)
+#
+# Author:  Madison Kelly (aka: Digimer - digimer@alteeve.com)
+# Date:    2012-01-30
+# Version: v0.1
+# License: GPL v2+
+# 
+
+use strict;
+use warnings;
+use POSIX;
+use IO::Handle;
+use Time::HiRes qw(usleep);
+$SIG{INT}  = \&catch_sig;
+$SIG{TERM} = \&catch_sig;
+
+my $conf={
+	# The local is where iperf tests will run from.
+	local_ip		=>	"192.168.1.73",
+# 	local_ip		=>	"10.249.0.36",
+	
+	# The remote is where the iperf server will run.
+	remote_ip		=>	"192.168.1.74",
+# 	remote_ip		=>	"10.249.0.37",
+	
+	# This is the increment, in bytes starting at 1500, that the MTU will
+	# be raised to the maximum.
+	iperf_mtu_stepping	=>	"500",
+	
+	# This sets a maximum MTU to test for. It is useful if setting a
+	# too-high MTU will break the network link.
+	mtu_maximum		=>	9000,
+	
+	# If set to 0, the program will roughly detect the maximum MTU. If set,
+	# the value becomes the maximum MTU (and assumes you've already ensured
+	# that your interfaces and network infrastructure handle it).
+# 	max_usable_mtu		=>	9000,
+	max_usable_mtu		=>	0,
+	
+	# This is the minimum MTU. It should never change from 1500.
+	min_usable_mtu		=>	1500,
+	
+	# This is the ICMP overhead to subtract from TCP payload sizes.
+	icmp_overhead		=>	28,
+	icmp_mtu_stepping	=>	100,
+	
+	# This is used to re-check pings to avoid early failures caused by
+	# stray packets.
+	fail_count		=>	0,
+	fail_limit		=>	3,
+	
+	# After calling iperf on the remote node, I need to wait a short time
+	# listener to be ready. This sets the delays in millionths of a second.
+	iperf_micro_sleep	=>	100000,
+	
+	# This is how many times I run each iperf test. An average of the
+	# results is stored.
+	iperf_test_count	=>	3,
+	
+	# Paths to programs.
+	path			=>	{
+		iperf			=>	"/usr/bin/iperf",
+		ssh			=>	"/usr/bin/ssh",
+		ping			=>	"/bin/ping",
+		ifconfig		=>	"/sbin/ifconfig",
+		'grep'			=>	"/bin/grep",
+		unbuffer		=>	"/usr/bin/unbuffer",
+		cat			=>	"/bin/cat",
+		killall			=>	"/usr/bin/killall",
+		tput			=>	"/usr/bin/tput",
+		np_temp			=>	"/tmp/network_profiler.out",
+	},
+	debug			=>	0,
+	prompt			=>	0,
+};
+
+print "\n-=] Network Profiler\n\n";
+
+kill_remote_processes($conf, "expect");
+kill_remote_processes($conf, "iperf");
+
+print "Detecting interfaces:\n";
+$conf->{local_dev}=detect_interface($conf, "local");
+if (not $conf->{local_dev})
+{
+	print "[ ERROR ] - Unable to detect the interface with IP: [$conf->{local_ip}].\n";
+	print "[ ERROR ] - Is the interface up and the IP specified properly?\n\n";
+	exit 1;
+}
+print " - Local Interface:  [$conf->{local_ip}] on: [$conf->{local_dev}]\n";
+$conf->{remote_dev}=detect_interface($conf, "remote");
+print " - Remote Interface: [$conf->{remote_ip}] on: [$conf->{remote_dev}]\n";
+
+# TODO:
+# Check for needed apps.
+
+if ($conf->{prompt})
+{
+	print "\n-=] WARNING\n\n";
+	print " - The MTU of the interfaces listed above will now be manipulated (heavily).\n";
+	print "   This may impact application on the network (like clusters).\n";
+	print " - This job can take half an hour to run!\n\n";
+	print "Are you ready to proceed? (y/N): ";
+	chomp (my $answer=<>);
+
+	if ((lc($answer) ne "y") && (lc($answer) ne "yes"))
+	{
+		print "Exiting on user abort.\n";
+		exit 0;
+	}
+}
+
+if ($conf->{max_usable_mtu} == 0)
+{
+	print "\nFinding maximum usable MTU between: [$conf->{local_ip}] and [$conf->{remote_ip}].\n";
+	($conf->{max_usable_mtu})=find_maximum_usable_mtu($conf);
+	print " - Maximum usable MTU, rounded down to the closest 100, is: [$conf->{max_usable_mtu} bytes].\n";
+	if ($conf->{max_usable_mtu} < 1500)
+	{
+		print "[ ERROR ] The detected maximum usable MTU size appears invalid!\n";
+		print "[ ERROR ] You may need to restore the default MTU of one or both nodes using:\n";
+		print "          remote: $conf->{path}{ifconfig} $conf->{remote_dev} mtu 1500\n";
+		print "          local:  $conf->{path}{ifconfig} $conf->{local_dev} mtu 1500\n\n";
+		exit 4;
+	}
+}
+else
+{
+	print "\nMaximum MTU for this network statically set to: [$conf->{max_usable_mtu}]\n";
+}
+
+print "\n-=] Beginning 'iperf' testing, averaging $conf->{iperf_test_count} tests.\n\n";
+
+print "Starting 'iperf' on the remote machine: ";
+my $parent_pid=$$;
+defined(my $child_pid=fork) or die "Can't fork, error: [$!].\n";
+if ($child_pid)
+{
+	usleep($conf->{iperf_micro_sleep});
+	print "Done.\n" if not $conf->{debug};
+	print "Done (local ssh PID: [$child_pid]).\n" if $conf->{debug};
+}
+else
+{
+	call_iperf_on_remote($conf);
+	exit 0;
+}
+my $iperf_mtu = 1500;
+
+$|=1;
+print " - Parent PID: [$parent_pid], child PID: [$child_pid]\n" if $conf->{debug};
+
+# Give the user an idea of how long they have to go make coffee.
+my $skipped_iterations = (($conf->{min_usable_mtu} / $conf->{iperf_mtu_stepping}) - 1);
+my $total_iterations   = ceil($conf->{max_usable_mtu} / $conf->{iperf_mtu_stepping});
+my $actual_iterations  = ($total_iterations - $skipped_iterations);
+my $per_test_time      = ($conf->{iperf_test_count} * 20);	# 10sec per half/full duplex.
+my $total_seconds      = $actual_iterations * $per_test_time;
+my $total_minutes      = $total_seconds / 60;
+$total_minutes=sprintf("%.1f", $total_minutes);
+print "Please be patient. I expect this will take roughly: [$total_minutes minutes].\n";
+print " - Time needed to change the MTU will add to this estimated time.\n";
+
+while ($iperf_mtu <= $conf->{max_usable_mtu})
+{
+	run_iperf_tests($conf, $iperf_mtu);
+	
+	# I want to always test the maximum MTU, which this will do.
+	if ($iperf_mtu != $conf->{max_usable_mtu})
+	{
+		$iperf_mtu += $conf->{iperf_mtu_stepping};
+		if ($iperf_mtu > $conf->{max_usable_mtu})
+		{
+			$iperf_mtu = $conf->{max_usable_mtu};
+		}
+	}
+	else
+	{
+		# Done.
+		last;
+	}
+}
+
+print "\nAll tests complete!\n\n";
+print "Graphs:\n\n";
+print_graphs($conf);
+
+print "\nEnsuring that all remote processes are killed.\n" if $conf->{debug};
+kill_remote_processes($conf, "expect");
+kill_remote_processes($conf, "iperf");
+
+exit 0;
+
+###############################################################################
+# Here be functions!                                                          #
+###############################################################################
+
+sub print_graphs
+{
+	my ($conf)=@_;
+	
+	$conf->{highest_value}=0;
+	foreach my $mtu (keys %{$conf->{iperf}{mtu}})
+	{
+		foreach my $key (keys %{$conf->{iperf}{mtu}{$mtu}{test}{avg}})
+		{
+			$conf->{highest_value}=$conf->{iperf}{mtu}{$mtu}{test}{avg}{$key} if $conf->{iperf}{mtu}{$mtu}{test}{avg}{$key} > $conf->{highest_value};
+		}
+	}
+	$conf->{highest_value}=sprintf("%.1f", $conf->{highest_value});
+	
+	my $cols=get_tput_cols($conf);
+	$conf->{max_graph_width}=($cols - 10);
+	foreach my $mtu (sort {$b cmp $a} keys %{$conf->{iperf}{mtu}})
+	{
+		my $bar_minus=13;
+		my $say_mtu=sprintf("%4s", $mtu);
+		if (length($conf->{max_usable_mtu}) == 5)
+		{
+			$bar_minus=14;
+			$say_mtu=sprintf("%5s", $mtu);
+		}
+		print "  MTU: [ $say_mtu bytes ]"; for (0..($conf->{max_graph_width} - $bar_minus)) { print "-"; } print "\n";
+		print "HD Tx: "; print_dots($conf, $conf->{iperf}{mtu}{$mtu}{test}{avg}{hd_tx_bandwidth});
+		print "HD Rx: "; print_dots($conf, $conf->{iperf}{mtu}{$mtu}{test}{avg}{hd_rx_bandwidth});
+		print "FD Tx: "; print_dots($conf, $conf->{iperf}{mtu}{$mtu}{test}{avg}{fd_tx_bandwidth});
+		print "FD Rx: "; print_dots($conf, $conf->{iperf}{mtu}{$mtu}{test}{avg}{fd_rx_bandwidth});
+	}
+	
+	return (0);
+}
+
+sub print_dots
+{
+	my ($conf, $bandwidth)=@_;
+	
+	my $say_bandwidth=sprintf("%.1f", $bandwidth);
+	my $overhead=8;
+	my $less_dots=4+$overhead;
+	if (length($conf->{highest_value}) == 7)
+	{
+		$say_bandwidth=sprintf("%7s", $say_bandwidth);
+		$less_dots=6+$overhead;
+	}
+	elsif (length($conf->{highest_value}) == 6)
+	{
+		$say_bandwidth=sprintf("%6s", $say_bandwidth);
+		$less_dots=6+$overhead;
+	}
+	elsif (length($conf->{highest_value}) == 5)
+	{
+		$say_bandwidth=sprintf("%5s", $say_bandwidth);
+		$less_dots=5+$overhead;
+	}
+	else
+	{
+		$say_bandwidth=sprintf("%4s", $say_bandwidth);
+	}
+	my $percent=sprintf("%.0f", (($bandwidth / $conf->{highest_value}) * 100));
+	my $dots=$conf->{max_graph_width} * ($percent / 100);
+# 	print "bandwidth: [$bandwidth], percent: [$percent], max width: [$conf->{max_graph_width}], dots: [$dots]";
+	
+	print " ${say_bandwidth} Mb/s |";
+	
+	my $full_dot=$dots;
+	my $remainder=0;
+	if ($dots=~/(\d+)\.(\d)/)
+	{
+		$full_dot=$1;
+		$remainder=$2;
+	}
+	
+	if ($full_dot > $less_dots)
+	{
+		$full_dot-=$less_dots;
+		for (0..$full_dot)
+		{
+			print "#";
+		}
+		if (($remainder > 3) && ($remainder < 7))
+		{
+			print ">";
+		}
+	}
+	print "\n";
+	
+	return(0);
+}
+
+sub get_tput_cols
+{
+	my ($conf)=@_;
+	my $cols=80;
+	
+	# This can't be called through IO::Handle as it always returns 80.
+	my $sc="$conf->{path}{tput} cols";
+# 	print "[ DEBUG ] - shell call: [$sc]\n" if $conf->{debug};
+	$cols=`$sc`;
+	chomp $cols;
+	
+	return ($cols);
+}
+
+sub run_iperf_tests
+{
+	my ($conf, $mtu)=@_;
+	
+	print "\nTesting iperf at MTU: [$mtu]; ";
+	print "\n" if $conf->{debug};
+	my ($new_remote_mtu)=alter_mtu($conf, "remote", $mtu);
+	print " - Remote: [$conf->{remote_dev}] now set with MTU: [$new_remote_mtu]\n" if $conf->{debug};
+	if ($mtu ne $new_remote_mtu)
+	{
+		print "[ ERROR ] I was unable change the MTU up to: [$mtu] on remote.\n";
+		print "[ ERROR ] Still at an MTU of: [$mtu].\n\n";
+		exit 5;
+	}
+	my ($new_local_mtu)=alter_mtu($conf, "local", $mtu);
+	print " - Local:  [$conf->{remote_dev}] now set with MTU: [$new_local_mtu]\n" if $conf->{debug};
+	if ($mtu ne $new_local_mtu)
+	{
+		print "[ ERROR ] I was unable change the MTU up to: [$mtu] on local.\n";
+		print "[ ERROR ] Still at an MTU of: [$mtu].\n\n";
+		exit 6;
+	}
+	
+	# Beginning Tests:
+	my $itc=$conf->{iperf_test_count};
+# 	$conf->{debug}=1;
+	foreach my $i (1..$itc)
+	{
+		print "$i: hd" if not $conf->{debug};
+		print " - Half-Duplex Test: [$i/$itc] with an MTU of: [$mtu], half duplex.\n" if $conf->{debug};
+		($conf->{iperf}{mtu}{$mtu}{test}{$i}{type},
+		 $conf->{iperf}{mtu}{$mtu}{test}{$i}{hd_tx_seconds},
+		 $conf->{iperf}{mtu}{$mtu}{test}{$i}{hd_tx_transfer}, 
+		 $conf->{iperf}{mtu}{$mtu}{test}{$i}{hd_tx_bandwidth},
+		 $conf->{iperf}{mtu}{$mtu}{test}{$i}{hd_rx_seconds}, 
+		 $conf->{iperf}{mtu}{$mtu}{test}{$i}{hd_rx_transfer}, 
+		 $conf->{iperf}{mtu}{$mtu}{test}{$i}{hd_rx_bandwidth})=call_iperf_on_local($conf, $i, "half_duplex");
+		print "   - TX: [$conf->{iperf}{mtu}{$mtu}{test}{$i}{hd_tx_transfer} KB] in: [$conf->{iperf}{mtu}{$mtu}{test}{$i}{hd_tx_seconds} seconds] -> [$conf->{iperf}{mtu}{$mtu}{test}{$i}{hd_tx_bandwidth} Kbps]\n" if $conf->{debug};
+		print "   - RX: [$conf->{iperf}{mtu}{$mtu}{test}{$i}{hd_rx_transfer} KB] in: [$conf->{iperf}{mtu}{$mtu}{test}{$i}{hd_rx_seconds} seconds] -> [$conf->{iperf}{mtu}{$mtu}{test}{$i}{hd_rx_bandwidth} Kbps]\n" if $conf->{debug};
+# 		print " - Half Duplex [$i/$itc]; Transmit: [$conf->{iperf}{mtu}{$mtu}{test}{$i}{hd_tx_bandwidth} Kbps], Receive: [$conf->{iperf}{mtu}{$mtu}{test}{$i}{hd_rx_bandwidth} Kbps]\n" if not $conf->{debug};
+		 
+		print ", fd, " if not $conf->{debug};
+		print " - Test: [$i/$itc] with an MTU of: [$mtu], full duplex.\n" if $conf->{debug};
+		($conf->{iperf}{mtu}{$mtu}{test}{$i}{type},
+		 $conf->{iperf}{mtu}{$mtu}{test}{$i}{fd_tx_seconds},
+		 $conf->{iperf}{mtu}{$mtu}{test}{$i}{fd_tx_transfer}, 
+		 $conf->{iperf}{mtu}{$mtu}{test}{$i}{fd_tx_bandwidth},
+		 $conf->{iperf}{mtu}{$mtu}{test}{$i}{fd_rx_seconds}, 
+		 $conf->{iperf}{mtu}{$mtu}{test}{$i}{fd_rx_transfer}, 
+		 $conf->{iperf}{mtu}{$mtu}{test}{$i}{fd_rx_bandwidth})=call_iperf_on_local($conf, $i, "full_duplex");
+		print "   - TX: [$conf->{iperf}{mtu}{$mtu}{test}{$i}{fd_tx_transfer} KB] in: [$conf->{iperf}{mtu}{$mtu}{test}{$i}{fd_tx_seconds} seconds] -> [$conf->{iperf}{mtu}{$mtu}{test}{$i}{fd_tx_bandwidth} Kbps]\n" if $conf->{debug};
+		print "   - RX: [$conf->{iperf}{mtu}{$mtu}{test}{$i}{fd_rx_transfer} KB] in: [$conf->{iperf}{mtu}{$mtu}{test}{$i}{fd_rx_seconds} seconds] -> [$conf->{iperf}{mtu}{$mtu}{test}{$i}{fd_rx_bandwidth} Kbps]\n" if $conf->{debug};
+# 		print " - Full Duplex [$i/$itc]; Transmit: [$conf->{iperf}{mtu}{$mtu}{test}{$i}{fd_tx_bandwidth} Kbps], Receive: [$conf->{iperf}{mtu}{$mtu}{test}{$i}{fd_rx_bandwidth} Kbps]\n" if not $conf->{debug};
+		
+		# Add to the totals for later averaging.
+		$conf->{iperf}{mtu}{$mtu}{test}{avg}{hd_tx_bandwidth} += $conf->{iperf}{mtu}{$mtu}{test}{$i}{hd_tx_bandwidth};
+		$conf->{iperf}{mtu}{$mtu}{test}{avg}{fd_tx_bandwidth} += $conf->{iperf}{mtu}{$mtu}{test}{$i}{fd_tx_bandwidth};
+		$conf->{iperf}{mtu}{$mtu}{test}{avg}{hd_rx_bandwidth} += $conf->{iperf}{mtu}{$mtu}{test}{$i}{hd_rx_bandwidth};
+		$conf->{iperf}{mtu}{$mtu}{test}{avg}{fd_rx_bandwidth} += $conf->{iperf}{mtu}{$mtu}{test}{$i}{fd_rx_bandwidth};
+	}
+	print "Done!\n" if not $conf->{debug};
+	
+	print " - Calculating Averages over $itc tests:\n" if $conf->{debug};
+	# Average sums.
+	$conf->{iperf}{mtu}{$mtu}{test}{avg}{hd_tx_bandwidth} /= $itc;
+	$conf->{iperf}{mtu}{$mtu}{test}{avg}{fd_tx_bandwidth} /= $itc;
+	$conf->{iperf}{mtu}{$mtu}{test}{avg}{hd_rx_bandwidth} /= $itc;
+	$conf->{iperf}{mtu}{$mtu}{test}{avg}{fd_rx_bandwidth} /= $itc;
+	# Convert from K -> M
+	$conf->{iperf}{mtu}{$mtu}{test}{avg}{hd_tx_bandwidth} /= 1024;
+	$conf->{iperf}{mtu}{$mtu}{test}{avg}{fd_tx_bandwidth} /= 1024;
+	$conf->{iperf}{mtu}{$mtu}{test}{avg}{hd_rx_bandwidth} /= 1024;
+	$conf->{iperf}{mtu}{$mtu}{test}{avg}{fd_rx_bandwidth} /= 1024;
+	# Cleanup output
+	$conf->{iperf}{mtu}{$mtu}{test}{avg}{hd_tx_bandwidth} = sprintf("%.2f", $conf->{iperf}{mtu}{$mtu}{test}{avg}{hd_tx_bandwidth});
+	$conf->{iperf}{mtu}{$mtu}{test}{avg}{fd_tx_bandwidth} = sprintf("%.2f", $conf->{iperf}{mtu}{$mtu}{test}{avg}{fd_tx_bandwidth});
+	$conf->{iperf}{mtu}{$mtu}{test}{avg}{hd_rx_bandwidth} = sprintf("%.2f", $conf->{iperf}{mtu}{$mtu}{test}{avg}{hd_rx_bandwidth});
+	$conf->{iperf}{mtu}{$mtu}{test}{avg}{fd_rx_bandwidth} = sprintf("%.2f", $conf->{iperf}{mtu}{$mtu}{test}{avg}{fd_rx_bandwidth});
+	print " - Half-Duplex TX: [$conf->{iperf}{mtu}{$mtu}{test}{avg}{hd_tx_bandwidth} Mbps], RX: [$conf->{iperf}{mtu}{$mtu}{test}{avg}{hd_rx_bandwidth} Mbps]\n";
+	print " - Full-Duplex TX: [$conf->{iperf}{mtu}{$mtu}{test}{avg}{fd_tx_bandwidth} Mbps], RX: [$conf->{iperf}{mtu}{$mtu}{test}{avg}{fd_rx_bandwidth} Mbps]\n";
+	
+	print "Killing the remote 'iperf' process.\n" if $conf->{debug};
+	kill 15, $child_pid;
+	
+	return (0);
+}
+
+sub kill_remote_processes
+{
+	my ($conf, $process)=@_;
+	
+	my $fh=IO::Handle->new();
+	my $sc="$conf->{path}{ssh} root\@$conf->{remote_ip} \"$conf->{path}{killall} $process\"";
+	print "[ DEBUG ] - shell call: [$sc]\n" if $conf->{debug};
+	open ($fh, "$sc 2>&1 |") or die "Failed to call: [$sc], error was: $!\n";
+	while(<$fh>)
+	{
+		# I don't care about this output
+		chomp;
+		my $line=$_;
+		print "[ DEBUG ] - shell return: [$line]\n" if $conf->{debug};
+	}
+	$fh->close();
+	
+	return (0);
+}
+
+sub call_iperf_on_local
+{
+	my ($conf, $test, $type)=@_;
+	
+	my $output;
+	
+	my $fh=IO::Handle->new();
+	my $sc="$conf->{path}{iperf} --client $conf->{remote_ip} --format k --reportexclude CMSV";
+	$sc.=" --tradeoff" if $type eq "half_duplex";
+	$sc.=" --dualtest" if $type eq "full_duplex";
+	print "[ DEBUG ] - shell call: [$sc]\n" if $conf->{debug};
+	open ($fh, "$sc 2>&1 |") or die "Failed to call: [$sc], error was: $!\n";
+	while(<$fh>)
+	{
+		# I don't care about this output
+		chomp;
+		my $line=$_;
+		print "[ DEBUG ] - shell return: [$line]\n" if $conf->{debug};
+		$output.="$line\n";
+	}
+	$fh->close();
+	
+	my ($tx_seconds, 
+	$tx_transfer, 
+	$tx_bandwidth,
+	$rx_seconds, 
+	$rx_transfer, 
+	$rx_bandwidth)=($output=~/\[.*?\]\s+.*?-(\d+\.\d+) sec\s+(\d+) KBytes\s+(\d+) Kbits\/sec\n\[.*?\]\s+.*?-(\d+\.\d+) sec\s+(\d+) KBytes\s+(\d+) Kbits\/sec/gs);
+
+	return ($type, $tx_seconds, $tx_transfer, $tx_bandwidth, $rx_seconds, $rx_transfer, $rx_bandwidth);
+}
+
+sub call_iperf_on_remote
+{
+	my ($conf)=@_;
+	
+	my $fh=IO::Handle->new();
+	my $sc="$conf->{path}{ssh} root\@$conf->{remote_ip} \"$conf->{path}{unbuffer} $conf->{path}{iperf} --server --bind $conf->{remote_ip}\"";
+	print "[ DEBUG ] - shell call: [$sc]\n" if $conf->{debug};
+	open ($fh, "$sc 2>&1 |") or die "Failed to call: [$sc], error was: $!\n";
+	while(<$fh>)
+	{
+		# I don't care about this output
+		chomp;
+		my $line=$_;
+		print "[ DEBUG ] - shell return: [$line]\n" if $conf->{debug};
+	}
+	$fh->close();
+	
+	return (0);
+}
+
+sub find_maximum_usable_mtu
+{
+	my ($conf)=@_;
+	
+	# Test the initial MTU of 1500.
+	print "\n" if $conf->{debug};
+	print " - " if not $conf->{debug};
+	print "Initial test with an MTU of: [$conf->{min_usable_mtu}] to confirm testing method; ";
+	print "\n" if $conf->{debug};
+	
+	# Initial tests.
+	my $test_mtu = $conf->{min_usable_mtu};
+	my $highest_good_mtu = $conf->{min_usable_mtu};
+	my ($ok)=set_mtu_and_ping($conf, $test_mtu, 0);
+	if (not $ok)
+	{
+		print "[ ERROR ] Unable to run ping-based tests! Is the network up?\n";
+		return ($highest_good_mtu);
+	}
+	
+	# This will catch an attempt to repeat a test and break the loop.
+	my $tested={};
+
+	my $difference = $conf->{mtu_maximum} - $conf->{min_usable_mtu};
+	$test_mtu = $conf->{mtu_maximum};
+	foreach my $i (1..1000)
+	{
+		last if $tested->{$test_mtu};
+		
+		# Test this MTU.
+		print " - Testing with an MTU of: [$test_mtu]; ";
+		my ($ok)=set_mtu_and_ping($conf, $test_mtu, 0);
+		
+		if (($i == 1) && ($ok))
+		{
+			# Highest allowable MTU is OK.
+			$highest_good_mtu = $test_mtu;
+			last;
+		}
+		
+		if ($ok)
+		{
+			$tested->{$test_mtu}='ok';
+			$highest_good_mtu = $test_mtu;
+			$test_mtu = ($test_mtu + ($difference / 2**$i));
+			$test_mtu = round_to_100($test_mtu);
+		}
+		else
+		{
+			$tested->{$test_mtu}='fail';
+			$test_mtu=($test_mtu - ($difference / 2**$i));
+			$test_mtu = round_to_100($test_mtu);
+		}
+	}
+	print "Found the highest usable MTU, rounded down to an even 100, is: [$highest_good_mtu].\n" if $conf->{debug};
+	
+	return ($highest_good_mtu);
+}
+
+sub set_mtu_and_ping
+{
+	my ($conf, $test_mtu, $repeat)=@_;
+	my $ok=0;
+	
+	# Change the MTUs, remote first.
+	my ($new_remote_mtu)=alter_mtu($conf, "remote", $test_mtu);
+	print " - Remote: [$conf->{remote_dev}] now set with MTU: [$new_remote_mtu]\n" if $conf->{debug};
+	if ($test_mtu ne $new_remote_mtu)
+	{
+		print "Too high.\n" if not $conf->{debug};
+		print "[ NOTICE ] I was unable to bump the MTU up to: [$test_mtu] on remote.\n" if $conf->{debug};
+		print "[ NOTICE ] Still at an MTU of: [$new_remote_mtu].\n" if $conf->{debug};
+		return ($ok);
+	}
+	my ($new_local_mtu)=alter_mtu($conf, "local", $test_mtu);
+	print " - Local:  [$conf->{remote_dev}] now set with MTU: [$new_local_mtu]\n" if $conf->{debug};
+	if ($test_mtu ne $new_local_mtu)
+	{
+		print "Too high.\n" if not $conf->{debug};
+		print "[ NOTICE ] I was unable to bump the MTU up to: [$test_mtu] on remote.\n" if $conf->{debug};
+		print "[ NOTICE ] Still at an MTU of: [$new_remote_mtu].\n" if $conf->{debug};
+		return ($ok);
+	}
+	
+	my $ping_size = $test_mtu - $conf->{icmp_overhead};
+	print " - Pinging: [$conf->{remote_ip}] with a single packet of: [$ping_size] bytes.\n" if $conf->{debug};
+	my ($success)=ping_remote($conf, $ping_size);
+	if ($success)
+	{
+		$ok=1;
+		$conf->{fail_count}=0;
+		print " - ICMP payload delivered in one packet, MTU appears valid!\n" if $conf->{debug};
+		print "OK!\n" if not $conf->{debug};
+	}
+	else
+	{
+		$conf->{fail_count}++;
+		if ($conf->{fail_count} > $conf->{fail_limit})
+		{
+			print "Failed!\n" if not $conf->{debug};
+			print "[ WARNING ] ICMP payload delivery failed, MTU appears invalid!\n" if $conf->{debug};
+			return ($ok);
+		}
+		else
+		{
+			print "Failed! [$conf->{fail_count}/$conf->{fail_limit}]\n" if not $conf->{debug};
+			print "[ WARNING ] ICMP payload delivery failed!\n" if $conf->{debug};
+			print "[ NOTICE ]  Failure count below limit: [$conf->{fail_count}/$conf->{fail_limit}].\n" if $conf->{debug};
+			print "[ NOTICE ]  Retrying in one second in case of transient network traffic.\n";
+			sleep 1;
+			my ($ok)=set_mtu_and_ping($conf, $test_mtu, 1);
+		}
+	}
+	
+	return($ok);
+}
+
+sub round_to_100
+{
+	my ($number)=@_;
+	$number=sprintf("%.0f", $number);
+	
+	my $diff=($number % 100);
+	if ($diff >= 50)
+	{
+		$number+=(100-$diff);
+	}
+	else
+	{
+		$number-=$diff;
+	}
+	
+	return ($number);
+}
+
+sub read_np_temp
+{
+	my ($conf, $where)=@_;
+	
+	my $file;
+	my $fh=IO::Handle->new();
+	my $sc="$conf->{path}{cat} $conf->{path}{np_temp}";
+	if ($where eq "remote")
+	{
+		$sc="$conf->{path}{ssh} root\@$conf->{remote_ip} \"$sc\"";
+	}
+# 	print "[ DEBUG ] - shell call: [$sc]\n" if $conf->{debug};
+	open ($fh, "$sc 2>&1 |") or die "Failed to call: [$sc], error was: $!\n";
+	while(<$fh>)
+	{
+		# This should never return anything.
+		chomp;
+		my $line=$_;
+# 		print "[ DEBUG ] - shell return: [$line]\n" if $conf->{debug};
+		$file.="$line\n";
+	}
+	$fh->close();
+	unlink $conf->{path}{np_temp};
+	
+	return ($file);
+}
+
+sub ping_remote
+{
+	my ($conf, $size)=@_;
+	
+	my $success=0;
+	my $fh=IO::Handle->new();
+	# Wait 1 second, don't fragment, one ping only, size of X (minus
+	# overhead).
+	my $sc="$conf->{path}{ping} $conf->{remote_ip} -w 1 -M do -c 1 -s $size";
+	print "[ DEBUG ] - shell call: [$sc]\n" if $conf->{debug};
+	open ($fh, "$sc 2>&1 |") or die "Failed to call: [$sc], error was: $!\n";
+	while(<$fh>)
+	{
+		chomp;
+		my $line=$_;
+		$success=1 if $line=~/0% packet loss/;
+		print "[ DEBUG ] - Success: [$success], shell return: [$line]\n" if $conf->{debug};
+	}
+	$fh->close();
+	
+=pod   Good
+PING 10.249.0.37 (10.249.0.37) 1476(1504) bytes of data.
+1484 bytes from 10.249.0.37: icmp_seq=1 ttl=64 time=1.64 ms
+
+--- 10.249.0.37 ping statistics ---
+1 packets transmitted, 1 received, 0% packet loss, time 0ms
+rtt min/avg/max/mdev = 1.645/1.645/1.645/0.000 ms
+=cut
+
+=pod   Local MTU exceeded
+PING 10.249.0.37 (10.249.0.37) 1473(1501) bytes of data.
+From 10.249.0.36 icmp_seq=1 Frag needed and DF set (mtu = 1500)
+
+--- 10.249.0.37 ping statistics ---
+0 packets transmitted, 0 received, +1 errors
+=cut
+
+=pod   Remote MTU exceeded
+PING 10.249.0.37 (10.249.0.37) 1477(1505) bytes of data.
+
+--- 10.249.0.37 ping statistics ---
+1 packets transmitted, 0 received, 100% packet loss, time 0ms
+=cut
+	return ($success);
+}
+
+sub alter_mtu
+{
+	my ($conf, $where, $mtu)=@_;
+	
+	my $dev_key=$where eq "local" ? "local_dev" : "remote_dev";
+	
+	# Alter the MTU
+	my $fh=IO::Handle->new();
+	my $sc="$conf->{path}{ifconfig} $conf->{$dev_key} mtu $mtu";
+	if ($where eq "remote")
+	{
+		$sc="$conf->{path}{ssh} root\@$conf->{remote_ip} \"$sc\"";
+	}
+	my $say_sc=$sc;
+# 	print "[ DEBUG ] - shell call: [$sc]\n" if $conf->{debug};
+# 	print "[ DEBUG ] - shell call: [$sc]\n";
+	open ($fh, "$sc 2>&1 |") or die "Failed to call: [$sc], error was: $!\n";
+	while(<$fh>)
+	{
+		# This should never return anything.
+		chomp;
+		my $line=$_;
+# 		print "[ DEBUG ] - shell return: [$line]\n" if $conf->{debug};
+# 		print "[ DEBUG ] - shell return: [$line]\n";
+	}
+	$fh->close();
+	
+	# Confirm the new MTU.
+	my $new_mtu;
+	$fh=IO::Handle->new();
+	$sc="$conf->{path}{ifconfig} $conf->{$dev_key}";
+	if ($where eq "remote")
+	{
+		$sc="$conf->{path}{ssh} root\@$conf->{remote_ip} \"$sc\"";
+	}
+# 	print "[ DEBUG ] - shell call: [$sc]\n" if $conf->{debug};
+# 	print "[ DEBUG ] - shell call: [$sc]\n";
+	open ($fh, "$sc 2>&1 |") or die "Failed to call: [$sc], error was: $!\n";
+	while(<$fh>)
+	{
+		chomp;
+		my $line=$_;
+# 		print "[ DEBUG ] - shell return: [$line]\n" if ($conf->{debug} && $line);
+# 		print "[ DEBUG ] - shell return: [$line]\n" if ($line);
+		if ($line =~ /MTU:(\d+)/)
+		{
+			$new_mtu = $1;
+		}
+# 		print "[ DEBUG ] - new_mtu: [$new_mtu]\n" if ($new_mtu);
+	}
+	$fh->close();
+# 	print "[ DEBUG ] - New MTU: [$new_mtu], requested MTU: [$mtu]\n" if $conf->{debug};
+# 	print "[ DEBUG ] - New MTU: [$new_mtu], requested MTU: [$mtu]\n";
+	
+	if ($new_mtu ne $mtu)
+	{
+		print "\n" if $conf->{debug};
+		print "[ WARNING ] Failed to set the $where device: [$conf->{$dev_key}] to have an MTU of: [$mtu]\n" if $conf->{debug};
+		print "[ WARNING ] Detected current MTU as: [$new_mtu]\n" if $conf->{debug};
+	}
+	
+	return ($new_mtu);
+}
+
+sub detect_interface
+{
+	my ($conf, $where)=@_;
+	my $dev;
+	my $ip_key=$where eq "local" ? "local_ip" : "remote_ip";
+	
+	my $fh=IO::Handle->new();
+	my $sc="$conf->{path}{ifconfig} | $conf->{path}{grep} -B 1 -A 3 $conf->{$ip_key}";
+	if ($where eq "remote")
+	{
+		$sc="$conf->{path}{ssh} root\@$conf->{remote_ip} \"$sc\"";
+	}
+# 	print "[ DEBUG ] - shell call: [$sc]\n" if $conf->{debug};
+	open ($fh, "$sc 2>&1 |") or die "Failed to call: [$sc], error was: $!\n";
+	while(<$fh>)
+	{
+		chomp;
+		my $line=$_;
+# 		print "[ DEBUG ] - shell return: [$line]\n" if $conf->{debug};
+		if ($line =~ /^(\S+)/)
+		{
+			$dev = $1;
+		}
+# 		print "[ DEBUG ] - dev: [$dev]\n" if $conf->{debug};
+	}
+	$fh->close();
+	
+	return ($dev);
+}
+
+sub catch_sig
+{
+	my $signame = shift;
+	die "Process with PID $$ Exiting on SIG${signame}.\n" if $conf->{debug};
+}

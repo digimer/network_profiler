@@ -1,0 +1,15 @@
+Program: Network Profiler
+Author:  digimer (digimer@alteeve.com)
+Date:    2012-01-30
+Version: 0.1.0
+License: GPL v2.0+
+
+Detect optimal MTU sizes.
+
+This program takes two IP addresses, one local and one remote, and adjusts the
+MTU of both interfaces using SSH with passwordless shared keys. It tests and
+records the performance at the various MTUs and reports in simple ASCII art
+graphs the results of the test. Benchmarking is done using iperf.
+
+For best results, both local and remote machine's IPs should be on the same
+type of network hardware.
