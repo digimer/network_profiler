@@ -1,7 +1,7 @@
 Program: Network Profiler
 Author:  digimer (digimer@alteeve.ca)
-Date:    2012-01-30
-Version: 0.1.0
+Date:    2013-01-29
+Version: 0.1.1
 License: GPL v2.0+
 
 Detect optimal MTU sizes.
@@ -19,4 +19,4 @@ already deployed.
 
 Requires (on RHEL/CentOS 6)
  - yum install expect perl-Time-HiRes
- - 
+
