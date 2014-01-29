@@ -26,11 +26,11 @@ $SIG{TERM} = \&catch_sig;
 
 my $conf={
 	# The local is where iperf tests will run from.
-	local_ip		=>	"192.168.1.73",
+	local_ip		=>	"10.10.20.1",
 # 	local_ip		=>	"10.249.0.36",
 	
 	# The remote is where the iperf server will run.
-	remote_ip		=>	"192.168.1.74",
+	remote_ip		=>	"10.10.20.2",
 # 	remote_ip		=>	"10.249.0.37",
 	
 	# This is the increment, in bytes starting at 1500, that the MTU will
@@ -141,24 +141,9 @@ else
 
 print "\n-=] Beginning 'iperf' testing, averaging $conf->{iperf_test_count} tests.\n\n";
 
-print "Starting 'iperf' on the remote machine: ";
-my $parent_pid=$$;
-defined(my $child_pid=fork) or die "Can't fork, error: [$!].\n";
-if ($child_pid)
-{
-	usleep($conf->{iperf_micro_sleep});
-	print "Done.\n" if not $conf->{debug};
-	print "Done (local ssh PID: [$child_pid]).\n" if $conf->{debug};
-}
-else
-{
-	call_iperf_on_remote($conf);
-	exit 0;
-}
 my $iperf_mtu = 1500;
 
 $|=1;
-print " - Parent PID: [$parent_pid], child PID: [$child_pid]\n" if $conf->{debug};
 
 # Give the user an idea of how long they have to go make coffee.
 my $skipped_iterations = (($conf->{min_usable_mtu} / $conf->{iperf_mtu_stepping}) - 1);
@@ -304,7 +289,7 @@ sub get_tput_cols
 	
 	# This can't be called through IO::Handle as it always returns 80.
 	my $sc="$conf->{path}{tput} cols";
-# 	print "[ DEBUG ] - shell call: [$sc]\n" if $conf->{debug};
+# 	print __LINE__."; [ DEBUG ] - shell call: [$sc]\n" if $conf->{debug};
 	$cols=`$sc`;
 	chomp $cols;
 	
@@ -313,11 +298,11 @@ sub get_tput_cols
 
 sub run_iperf_tests
 {
-	my ($conf, $mtu)=@_;
+	my ($conf, $mtu) = @_;
 	
 	print "\nTesting iperf at MTU: [$mtu]; ";
 	print "\n" if $conf->{debug};
-	my ($new_remote_mtu)=alter_mtu($conf, "remote", $mtu);
+	my ($new_remote_mtu) = alter_mtu($conf, "remote", $mtu);
 	print " - Remote: [$conf->{remote_dev}] now set with MTU: [$new_remote_mtu]\n" if $conf->{debug};
 	if ($mtu ne $new_remote_mtu)
 	{
@@ -325,7 +310,7 @@ sub run_iperf_tests
 		print "[ ERROR ] Still at an MTU of: [$mtu].\n\n";
 		exit 5;
 	}
-	my ($new_local_mtu)=alter_mtu($conf, "local", $mtu);
+	my ($new_local_mtu) = alter_mtu($conf, "local", $mtu);
 	print " - Local:  [$conf->{remote_dev}] now set with MTU: [$new_local_mtu]\n" if $conf->{debug};
 	if ($mtu ne $new_local_mtu)
 	{
@@ -335,7 +320,7 @@ sub run_iperf_tests
 	}
 	
 	# Beginning Tests:
-	my $itc=$conf->{iperf_test_count};
+	my $itc = $conf->{iperf_test_count};
 # 	$conf->{debug}=1;
 	foreach my $i (1..$itc)
 	{
@@ -347,7 +332,7 @@ sub run_iperf_tests
 		 $conf->{iperf}{mtu}{$mtu}{test}{$i}{hd_tx_bandwidth},
 		 $conf->{iperf}{mtu}{$mtu}{test}{$i}{hd_rx_seconds}, 
 		 $conf->{iperf}{mtu}{$mtu}{test}{$i}{hd_rx_transfer}, 
-		 $conf->{iperf}{mtu}{$mtu}{test}{$i}{hd_rx_bandwidth})=call_iperf_on_local($conf, $i, "half_duplex");
+		 $conf->{iperf}{mtu}{$mtu}{test}{$i}{hd_rx_bandwidth}) = call_iperf_on_local($conf, $i, "half_duplex");
 		print "   - TX: [$conf->{iperf}{mtu}{$mtu}{test}{$i}{hd_tx_transfer} KB] in: [$conf->{iperf}{mtu}{$mtu}{test}{$i}{hd_tx_seconds} seconds] -> [$conf->{iperf}{mtu}{$mtu}{test}{$i}{hd_tx_bandwidth} Kbps]\n" if $conf->{debug};
 		print "   - RX: [$conf->{iperf}{mtu}{$mtu}{test}{$i}{hd_rx_transfer} KB] in: [$conf->{iperf}{mtu}{$mtu}{test}{$i}{hd_rx_seconds} seconds] -> [$conf->{iperf}{mtu}{$mtu}{test}{$i}{hd_rx_bandwidth} Kbps]\n" if $conf->{debug};
 # 		print " - Half Duplex [$i/$itc]; Transmit: [$conf->{iperf}{mtu}{$mtu}{test}{$i}{hd_tx_bandwidth} Kbps], Receive: [$conf->{iperf}{mtu}{$mtu}{test}{$i}{hd_rx_bandwidth} Kbps]\n" if not $conf->{debug};
@@ -360,7 +345,7 @@ sub run_iperf_tests
 		 $conf->{iperf}{mtu}{$mtu}{test}{$i}{fd_tx_bandwidth},
 		 $conf->{iperf}{mtu}{$mtu}{test}{$i}{fd_rx_seconds}, 
 		 $conf->{iperf}{mtu}{$mtu}{test}{$i}{fd_rx_transfer}, 
-		 $conf->{iperf}{mtu}{$mtu}{test}{$i}{fd_rx_bandwidth})=call_iperf_on_local($conf, $i, "full_duplex");
+		 $conf->{iperf}{mtu}{$mtu}{test}{$i}{fd_rx_bandwidth}) = call_iperf_on_local($conf, $i, "full_duplex");
 		print "   - TX: [$conf->{iperf}{mtu}{$mtu}{test}{$i}{fd_tx_transfer} KB] in: [$conf->{iperf}{mtu}{$mtu}{test}{$i}{fd_tx_seconds} seconds] -> [$conf->{iperf}{mtu}{$mtu}{test}{$i}{fd_tx_bandwidth} Kbps]\n" if $conf->{debug};
 		print "   - RX: [$conf->{iperf}{mtu}{$mtu}{test}{$i}{fd_rx_transfer} KB] in: [$conf->{iperf}{mtu}{$mtu}{test}{$i}{fd_rx_seconds} seconds] -> [$conf->{iperf}{mtu}{$mtu}{test}{$i}{fd_rx_bandwidth} Kbps]\n" if $conf->{debug};
 # 		print " - Full Duplex [$i/$itc]; Transmit: [$conf->{iperf}{mtu}{$mtu}{test}{$i}{fd_tx_bandwidth} Kbps], Receive: [$conf->{iperf}{mtu}{$mtu}{test}{$i}{fd_rx_bandwidth} Kbps]\n" if not $conf->{debug};
@@ -393,29 +378,50 @@ sub run_iperf_tests
 	print " - Full-Duplex TX: [$conf->{iperf}{mtu}{$mtu}{test}{avg}{fd_tx_bandwidth} Mbps], RX: [$conf->{iperf}{mtu}{$mtu}{test}{avg}{fd_rx_bandwidth} Mbps]\n";
 	
 	print "Killing the remote 'iperf' process.\n" if $conf->{debug};
-	kill 15, $child_pid;
 	
 	return (0);
 }
 
+# iperf 2.0.4-1.el6 server crashes after the first test. So this re-invokes it.
 sub kill_remote_processes
 {
 	my ($conf, $process)=@_;
 	
 	my $fh=IO::Handle->new();
 	my $sc="$conf->{path}{ssh} root\@$conf->{remote_ip} \"$conf->{path}{killall} $process\"";
-	print "[ DEBUG ] - shell call: [$sc]\n" if $conf->{debug};
+	print __LINE__."; [ DEBUG ] - shell call: [$sc]\n" if $conf->{debug};
 	open ($fh, "$sc 2>&1 |") or die "Failed to call: [$sc], error was: $!\n";
 	while(<$fh>)
 	{
 		# I don't care about this output
 		chomp;
 		my $line=$_;
-		print "[ DEBUG ] - shell return: [$line]\n" if $conf->{debug};
+		print __LINE__."; [ DEBUG ] - shell return: [$line]\n" if $conf->{debug};
 	}
 	$fh->close();
 	
 	return (0);
+}
+
+sub fork_remote_iperf_call
+{
+	my ($conf) = @_;
+
+	print __LINE__.": [ DEBUG ] - Starting 'iperf' on the remote machine: " if $conf->{debug};
+	my $parent_pid = $$;
+	defined(my $child_pid = fork) or die "Can't fork, error: [$!].\n";
+	if ($child_pid)
+	{
+		usleep($conf->{iperf_micro_sleep});
+		print __LINE__.": [ DEBUG ] - Done (local ssh PID: [$child_pid]).\n" if $conf->{debug};
+	}
+	else
+	{
+		call_iperf_on_remote($conf);
+		exit 0;
+	}
+	print __LINE__.": [ DEBUG ] - Parent PID: [$parent_pid], child PID: [$child_pid]\n" if $conf->{debug};
+	return ($parent_pid, $child_pid);
 }
 
 sub call_iperf_on_local
@@ -424,46 +430,87 @@ sub call_iperf_on_local
 	
 	my $output;
 	
-	my $fh=IO::Handle->new();
-	my $sc="$conf->{path}{iperf} --client $conf->{remote_ip} --format k --reportexclude CMSV";
-	$sc.=" --tradeoff" if $type eq "half_duplex";
-	$sc.=" --dualtest" if $type eq "full_duplex";
-	print "[ DEBUG ] - shell call: [$sc]\n" if $conf->{debug};
+	my ($parent_pid, $child_pid) = fork_remote_iperf_call($conf);
+	my $fh = IO::Handle->new();
+	my $sc = "$conf->{path}{iperf} --client $conf->{remote_ip} --format k --reportexclude CMSV";
+	$sc .= " --tradeoff" if $type eq "half_duplex";
+	$sc .= " --dualtest" if $type eq "full_duplex";
+	print __LINE__."; [ DEBUG ] - shell call: [$sc]\n" if $conf->{debug};
 	open ($fh, "$sc 2>&1 |") or die "Failed to call: [$sc], error was: $!\n";
 	while(<$fh>)
 	{
 		# I don't care about this output
 		chomp;
-		my $line=$_;
-		print "[ DEBUG ] - shell return: [$line]\n" if $conf->{debug};
+		my $line = $_;
+		print __LINE__."; [ DEBUG ] - shell return: [$line]\n" if $conf->{debug};
 		$output.="$line\n";
 	}
 	$fh->close();
+	kill_remote_processes($conf, "iperf");
+	kill 15, $child_pid;
 	
-	my ($tx_seconds, 
-	$tx_transfer, 
-	$tx_bandwidth,
-	$rx_seconds, 
-	$rx_transfer, 
-	$rx_bandwidth)=($output=~/\[.*?\]\s+.*?-(\d+\.\d+) sec\s+(\d+) KBytes\s+(\d+) Kbits\/sec\n\[.*?\]\s+.*?-(\d+\.\d+) sec\s+(\d+) KBytes\s+(\d+) Kbits\/sec/gs);
+	my $tx_seconds   = 0;
+	my $tx_transfer  = 0;
+	my $tx_bandwidth = 0;
+	my $rx_seconds   = 0;
+	my $rx_transfer  = 0;
+	my $rx_bandwidth = 0;
+	print __LINE__." [ DEBUG ] - output: [$output]\n" if $conf->{debug};
+	foreach my $line (split/\n/, $output)
+	{
+		print __LINE__." [ DEBUG ] - line: [$line]\n" if $conf->{debug};
+		if ($line =~ /\[.*?\]\s+.*?-(\d+\.\d+) sec\s+(\d+) KBytes\s+(\d+) Kbits\/sec/)
+		{
+			my $seconds   = $1;
+			my $transfer  = $2;
+			my $bandwidth = $3;
+			 print __LINE__." [ DEBUG ] - seconds: [$seconds], transfer: [$transfer], bandwidth: [$bandwidth]\n" if $conf->{debug};
+			if (not $tx_seconds)
+			{
+				$tx_seconds   = $seconds;
+				$tx_transfer  = $transfer;
+				$tx_bandwidth = $bandwidth;
+			 	print __LINE__." [ DEBUG ] - tx_seconds: [$tx_seconds], tx_transfer: [$tx_transfer], tx_bandwidth: [$bandwidth]\n" if $conf->{debug};
+			}
+			else
+			{
+				$rx_seconds   = $seconds;
+				$rx_transfer  = $transfer;
+				$rx_bandwidth = $bandwidth;
+			 	print __LINE__." [ DEBUG ] - rx_seconds: [$rx_seconds], rx_transfer: [$rx_transfer], rx_bandwidth: [$rx_bandwidth]\n" if $conf->{debug};
+			}
+		}
+	}
+	#my ($tx_seconds, 
+	#$tx_transfer, 
+	#$tx_bandwidth,
+	#$rx_seconds, 
+	#$rx_transfer, 
+	#$rx_bandwidth) = ($output=~/\[.*?\]\s+.*?-(\d+\.\d+) sec\s+(\d+) KBytes\s+(\d+) Kbits\/sec\n\[.*?\]\s+.*?-(\d+\.\d+) sec\s+(\d+) KBytes\s+(\d+) Kbits\/sec/gs);
+	print __LINE__." [ DEBUG ] - tx_seconds:   [$tx_seconds]\n" if $conf->{debug};
+	print __LINE__." [ DEBUG ] - tx_transfer:  [$tx_transfer]\n" if $conf->{debug};
+	print __LINE__." [ DEBUG ] - tx_bandwidth: [$tx_bandwidth]\n" if $conf->{debug};
+	print __LINE__." [ DEBUG ] - rx_seconds:   [$rx_seconds]\n" if $conf->{debug};
+	print __LINE__." [ DEBUG ] - rx_transfer:  [$rx_transfer]\n" if $conf->{debug};
+	print __LINE__." [ DEBUG ] - rx_bandwidth: [$rx_bandwidth]\n" if $conf->{debug};
 
 	return ($type, $tx_seconds, $tx_transfer, $tx_bandwidth, $rx_seconds, $rx_transfer, $rx_bandwidth);
 }
 
 sub call_iperf_on_remote
 {
-	my ($conf)=@_;
-	
-	my $fh=IO::Handle->new();
-	my $sc="$conf->{path}{ssh} root\@$conf->{remote_ip} \"$conf->{path}{unbuffer} $conf->{path}{iperf} --server --bind $conf->{remote_ip}\"";
-	print "[ DEBUG ] - shell call: [$sc]\n" if $conf->{debug};
+	my ($conf) = @_;
+
+	my $fh = IO::Handle->new();
+	my $sc = "$conf->{path}{ssh} root\@$conf->{remote_ip} \"/bin/kill \$(pidof iperf); $conf->{path}{unbuffer} $conf->{path}{iperf} --server --bind $conf->{remote_ip}\"";
+	print __LINE__."; [ DEBUG ] - shell call: [$sc]\n" if $conf->{debug};
 	open ($fh, "$sc 2>&1 |") or die "Failed to call: [$sc], error was: $!\n";
 	while(<$fh>)
 	{
 		# I don't care about this output
 		chomp;
-		my $line=$_;
-		print "[ DEBUG ] - shell return: [$line]\n" if $conf->{debug};
+		my $line = $_;
+		print __LINE__."; [ DEBUG ] - shell return: [$line]\n" if $conf->{debug};
 	}
 	$fh->close();
 	
@@ -616,14 +663,14 @@ sub read_np_temp
 	{
 		$sc="$conf->{path}{ssh} root\@$conf->{remote_ip} \"$sc\"";
 	}
-# 	print "[ DEBUG ] - shell call: [$sc]\n" if $conf->{debug};
+# 	print __LINE__."; [ DEBUG ] - shell call: [$sc]\n" if $conf->{debug};
 	open ($fh, "$sc 2>&1 |") or die "Failed to call: [$sc], error was: $!\n";
 	while(<$fh>)
 	{
 		# This should never return anything.
 		chomp;
 		my $line=$_;
-# 		print "[ DEBUG ] - shell return: [$line]\n" if $conf->{debug};
+# 		print __LINE__."; [ DEBUG ] - shell return: [$line]\n" if $conf->{debug};
 		$file.="$line\n";
 	}
 	$fh->close();
@@ -641,14 +688,14 @@ sub ping_remote
 	# Wait 1 second, don't fragment, one ping only, size of X (minus
 	# overhead).
 	my $sc="$conf->{path}{ping} $conf->{remote_ip} -w 1 -M do -c 1 -s $size";
-	print "[ DEBUG ] - shell call: [$sc]\n" if $conf->{debug};
+	print __LINE__."; [ DEBUG ] - shell call: [$sc]\n" if $conf->{debug};
 	open ($fh, "$sc 2>&1 |") or die "Failed to call: [$sc], error was: $!\n";
 	while(<$fh>)
 	{
 		chomp;
 		my $line=$_;
 		$success=1 if $line=~/0% packet loss/;
-		print "[ DEBUG ] - Success: [$success], shell return: [$line]\n" if $conf->{debug};
+		print __LINE__."; [ DEBUG ] - Success: [$success], shell return: [$line]\n" if $conf->{debug};
 	}
 	$fh->close();
 	
@@ -692,16 +739,16 @@ sub alter_mtu
 		$sc="$conf->{path}{ssh} root\@$conf->{remote_ip} \"$sc\"";
 	}
 	my $say_sc=$sc;
-# 	print "[ DEBUG ] - shell call: [$sc]\n" if $conf->{debug};
-# 	print "[ DEBUG ] - shell call: [$sc]\n";
+# 	print __LINE__."; [ DEBUG ] - shell call: [$sc]\n" if $conf->{debug};
+# 	print __LINE__."; [ DEBUG ] - shell call: [$sc]\n";
 	open ($fh, "$sc 2>&1 |") or die "Failed to call: [$sc], error was: $!\n";
 	while(<$fh>)
 	{
 		# This should never return anything.
 		chomp;
 		my $line=$_;
-# 		print "[ DEBUG ] - shell return: [$line]\n" if $conf->{debug};
-# 		print "[ DEBUG ] - shell return: [$line]\n";
+# 		print __LINE__."; [ DEBUG ] - shell return: [$line]\n" if $conf->{debug};
+# 		print __LINE__."; [ DEBUG ] - shell return: [$line]\n";
 	}
 	$fh->close();
 	
@@ -713,24 +760,24 @@ sub alter_mtu
 	{
 		$sc="$conf->{path}{ssh} root\@$conf->{remote_ip} \"$sc\"";
 	}
-# 	print "[ DEBUG ] - shell call: [$sc]\n" if $conf->{debug};
-# 	print "[ DEBUG ] - shell call: [$sc]\n";
+# 	print __LINE__."; [ DEBUG ] - shell call: [$sc]\n" if $conf->{debug};
+# 	print __LINE__."; [ DEBUG ] - shell call: [$sc]\n";
 	open ($fh, "$sc 2>&1 |") or die "Failed to call: [$sc], error was: $!\n";
 	while(<$fh>)
 	{
 		chomp;
 		my $line=$_;
-# 		print "[ DEBUG ] - shell return: [$line]\n" if ($conf->{debug} && $line);
-# 		print "[ DEBUG ] - shell return: [$line]\n" if ($line);
+# 		print __LINE__."; [ DEBUG ] - shell return: [$line]\n" if ($conf->{debug} && $line);
+# 		print __LINE__."; [ DEBUG ] - shell return: [$line]\n" if ($line);
 		if ($line =~ /MTU:(\d+)/)
 		{
 			$new_mtu = $1;
 		}
-# 		print "[ DEBUG ] - new_mtu: [$new_mtu]\n" if ($new_mtu);
+# 		print __LINE__."; [ DEBUG ] - new_mtu: [$new_mtu]\n" if ($new_mtu);
 	}
 	$fh->close();
-# 	print "[ DEBUG ] - New MTU: [$new_mtu], requested MTU: [$mtu]\n" if $conf->{debug};
-# 	print "[ DEBUG ] - New MTU: [$new_mtu], requested MTU: [$mtu]\n";
+# 	print __LINE__."; [ DEBUG ] - New MTU: [$new_mtu], requested MTU: [$mtu]\n" if $conf->{debug};
+# 	print __LINE__."; [ DEBUG ] - New MTU: [$new_mtu], requested MTU: [$mtu]\n";
 	
 	if ($new_mtu ne $mtu)
 	{
@@ -754,18 +801,18 @@ sub detect_interface
 	{
 		$sc="$conf->{path}{ssh} root\@$conf->{remote_ip} \"$sc\"";
 	}
-# 	print "[ DEBUG ] - shell call: [$sc]\n" if $conf->{debug};
+# 	print __LINE__."; [ DEBUG ] - shell call: [$sc]\n" if $conf->{debug};
 	open ($fh, "$sc 2>&1 |") or die "Failed to call: [$sc], error was: $!\n";
 	while(<$fh>)
 	{
 		chomp;
 		my $line=$_;
-# 		print "[ DEBUG ] - shell return: [$line]\n" if $conf->{debug};
+# 		print __LINE__."; [ DEBUG ] - shell return: [$line]\n" if $conf->{debug};
 		if ($line =~ /^(\S+)/)
 		{
 			$dev = $1;
 		}
-# 		print "[ DEBUG ] - dev: [$dev]\n" if $conf->{debug};
+# 		print __LINE__."; [ DEBUG ] - dev: [$dev]\n" if $conf->{debug};
 	}
 	$fh->close();
 	

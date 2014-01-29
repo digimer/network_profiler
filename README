@@ -1,5 +1,5 @@
 Program: Network Profiler
-Author:  digimer (digimer@alteeve.com)
+Author:  digimer (digimer@alteeve.ca)
 Date:    2012-01-30
 Version: 0.1.0
 License: GPL v2.0+
@@ -16,3 +16,7 @@ type of network card. This is because the MTU is adjusted in tandem on both
 sides, and differing hardware may not produce the most useful information. It
 will, however, provide the best MTU for that scenario, if your hardware is
 already deployed.
+
+Requires (on RHEL/CentOS 6)
+ - yum install expect perl-Time-HiRes
+ - 
